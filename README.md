@@ -48,8 +48,11 @@ AI语音聊天，视频监控项目
 
   6、监控模式，摄像头OV2640驱动 缓存监控录像到SD卡，使用http协议，推流摄像头数据到上机位展示
   <img width="2837" height="1280" alt="8e2178661c4c8bf709dc2b7981fc0747" src="https://github.com/user-attachments/assets/a9df8302-fc71-42cb-9aaa-9383b7c48286" />
-  
 
+  7、OTA升级
+  <img width="574" height="276" alt="592f1d728367d209d7663c4b0b5562f2" src="https://github.com/user-attachments/assets/abb2e805-5a6d-4645-8be2-81428dac5622" />
+
+  8、版本信息
 
 上机位
 
@@ -59,6 +62,7 @@ AI语音聊天，视频监控项目
 
 <img width="387" height="823" alt="image" src="https://github.com/user-attachments/assets/dc7164fd-85b0-4913-9279-0e9b85900c21" />
 <img width="380" height="814" alt="image" src="https://github.com/user-attachments/assets/911c1bb3-70bd-45c1-bcbb-5aa088538512" />
+<img width="1260" height="2800" alt="6544abf787e319ba6407cc297d8cf4af" src="https://github.com/user-attachments/assets/3a5c03ad-6882-4563-b932-2130d9a4bb6d" />
 
 
 HTML界面
