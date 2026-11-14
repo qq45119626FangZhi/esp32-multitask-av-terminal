@@ -43,13 +43,13 @@ AI语音聊天，视频监控项目
   
   虾哥提供的后端交互智能体平台：<img width="696" height="373" alt="image" src="https://github.com/user-attachments/assets/92bf93ac-bc71-4b7e-b404-44ce2e04d9ac" />
 
-  5、门铃模式
+  5、门铃模式，视频录制20s
     <img width="2837" height="1280" alt="2bb18505b8b0a1b49e578ae8dadbd152" src="https://github.com/user-attachments/assets/80c03d2e-95ba-43f2-a7e0-6b7f104bdcec" />
 
-  6、监控模式，摄像头OV2640驱动 缓存监控录像到SD卡，使用http协议，推流摄像头数据到上机位展示
+  6、监控模式，摄像头OV2640驱动采集数据，拷贝3份，1渲染到LCD，2缓存到SD卡，3使用http协议，推流摄像头数据到上机位展示
   <img width="2837" height="1280" alt="8e2178661c4c8bf709dc2b7981fc0747" src="https://github.com/user-attachments/assets/a9df8302-fc71-42cb-9aaa-9383b7c48286" />
 
-  7、OTA升级
+  7、OTA升级，上机位上传，flash 直写 + SD 备份，第二种 从设备 SD 读包写 flash。
   <img width="574" height="276" alt="592f1d728367d209d7663c4b0b5562f2" src="https://github.com/user-attachments/assets/abb2e805-5a6d-4645-8be2-81428dac5622" />
 
   8、版本信息
