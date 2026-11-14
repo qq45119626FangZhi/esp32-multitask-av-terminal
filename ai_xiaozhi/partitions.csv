@@ -1,6 +1,16 @@
 # ESP-IDF Partition Table
-# Name,   Type, SubType, Offset,  Size,   Flags
-nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 4M,
-model,  data,        ,         ,    500K
+# 双 OTA 布局（2026-11-14）：支持手机推送 / SD 卡包安装
+#   约束 1：app 分区的 offset 必须 64KB(0x10000) 对齐、size 必须 4KB 对齐；
+#   约束 2：model(唤醒词模型) 是 data 分区，只需 4KB 对齐，所以放到 app 之前，
+#           这样 app 槽能对齐到 0x60000，避免 0x12000~0x20000 的 56KB 浪费。
+#   布局：nvs/otadata/phy_init/model 之后是 ota_0(0x60000~0x430000)
+#         和 ota_1(0x430000~0x800000)，每槽 0x3D0000 = 3.81 MiB（8MB 下的最大值）
+#   model 0x4E000 = 319,488 B，srmodels.bin 约 291,043 B（余量 28 KB）
+#   ！！改任何 size 都要重新核对相邻 offset，且 0x800000 是 8 MiB 末尾
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xf000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+model,    data, spiffs,  0x12000,  0x4e000,
+ota_0,    app,  ota_0,   0x60000,  0x3d0000,
+ota_1,    app,  ota_1,   0x430000, 0x3d0000,

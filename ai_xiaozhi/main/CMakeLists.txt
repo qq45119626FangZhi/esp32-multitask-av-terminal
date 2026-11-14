@@ -6,9 +6,12 @@ idf_component_register(
     "doorbell/xiaozhi_doorbell.c"
     "storage/xiaozhi_sdcard.c"
     "storage/xiaozhi_recorder.c"
+    "ota/xiaozhi_ota.c"
     "camera/xiaozhi_camera.c"
     "display/xiaozhi_camview.c"
     "display/xiaozhi_camstamp.c"
+    "display/xiaozhi_lcd.c"
+    "display/xiaozhi_lvgl.c"
     "led/xiaozhi_led.c"
     "adc_button/adc_button.c"
     "internet/xiaozhi_wifi.c"
@@ -16,8 +19,6 @@ idf_component_register(
     "internet/xiaozhi_time.c"
     "internet/xiaozhi_ws.c"
     "internet/xiaozhi_http.c"
-    "display/xiaozhi_lcd.c"
-    "display/xiaozhi_lvgl.c"
     "audio/xiaozhi_audio.c"
     "audio/xiaozhi_audio_encoder.c"
     "audio/xiaozhi_audio_decoder.c"
@@ -28,6 +29,7 @@ idf_component_register(
     "app"
     "doorbell"
     "storage"
+    "ota"
     "camera"
     "display"
     "led"
@@ -37,5 +39,5 @@ idf_component_register(
     "audio"
     "vol_iot_desc"
     
-  EMBED_FILES image.jpg
+  # image.jpg 已随 xiaozhi_lcd_show_image() 一起删除（全项目无调用，省 43.7 KB flash）
   )

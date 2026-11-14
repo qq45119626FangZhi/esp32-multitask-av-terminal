@@ -35,6 +35,13 @@
             android:name=".ui.FileBrowserActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
+
+        <!-- OTA 升级页：列出设备上的升级包 / 选择手机文件推送 -->
+        <activity
+            android:name=".ui.OtaActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:windowSoftInputMode="adjustNothing" />
     </application>
 
 </manifest>

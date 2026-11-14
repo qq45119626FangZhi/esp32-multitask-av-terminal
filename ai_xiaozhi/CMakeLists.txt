@@ -5,7 +5,16 @@
 cmake_minimum_required(VERSION 3.16)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(atguigu_aixiaozhi)
+# VERSION 会写进 esp_app_desc.version（OTA 列表/设备详情页版本号都以它为准）：
+#   详情页显示 V1.0（取前两段），/api/status 返回完整 "1.0.0"
+# 打包不同版本的 OTA 包时用 -DXZ_OTA_VER=x.y.z 覆盖，不需要改本文件：
+#   idf.py -DXZ_OTA_VER=2.0.0 build   → build/atguigu_aixiaozhi.bin 就是 V2.0 的包
+# 注意：该值会缓存在 build/CMakeCache.txt，之后不加 -D 也仍是上次的值，
+#       要回到默认 1.0.0 需再执行一次 idf.py -DXZ_OTA_VER=1.0.0 build。
+if(NOT DEFINED XZ_OTA_VER)
+    set(XZ_OTA_VER "1.0.0")
+endif()
+project(atguigu_aixiaozhi VERSION ${XZ_OTA_VER})
 
 # ---------------------------------------------------------------------------
 # M2 摄像头：让 espressif/esp32-camera 使用新版 I2C 驱动（sccb-ng.c）

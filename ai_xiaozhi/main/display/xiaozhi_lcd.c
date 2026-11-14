@@ -17,8 +17,6 @@
 // The pixel number in horizontal and vertical
 #define EXAMPLE_LCD_H_RES 320
 #define EXAMPLE_LCD_V_RES 240
-#define IMAGE_W 320
-#define IMAGE_H 240
 // Bit number used to represent command and parameter
 #define EXAMPLE_LCD_CMD_BITS 8
 #define EXAMPLE_LCD_PARAM_BITS 8
@@ -29,8 +27,6 @@ static uint16_t *s_lines[2];
 esp_lcd_panel_handle_t panel_handle = NULL;
 esp_lcd_panel_io_handle_t io_handle = NULL;
 
-extern const uint8_t image_jpg_start[] asm("_binary_image_jpg_start");
-extern const uint8_t image_jpg_end[] asm("_binary_image_jpg_end");
 void xiaozhi_lcd_init(void)
 {
   // 背光的配置
@@ -129,33 +125,6 @@ void xiaozhi_lcd_show(uint8_t *pixels)
   }
 }
 
-/* 封装用于显示图片的方法 */
-void xiaozhi_lcd_show_image(void)
-{
-  // 对图片进行取模（解码缓冲放 PSRAM：QVGA RGB565 约 150KB，别占内部 RAM）
-  uint8_t *pixels = (uint8_t *)heap_caps_calloc(1, (size_t)IMAGE_H * IMAGE_W * sizeof(uint16_t),
-                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (pixels == NULL) {
-    pixels = (uint8_t *)calloc(IMAGE_H * IMAGE_W, sizeof(uint16_t));
-  }
-  // JPEG decode config
-  esp_jpeg_image_cfg_t jpeg_cfg = {
-      .indata = (uint8_t *)image_jpg_start,
-      .indata_size = image_jpg_end - image_jpg_start,
-      .outbuf = pixels,
-      .outbuf_size = IMAGE_W * IMAGE_H * sizeof(uint16_t),
-      .out_format = JPEG_IMAGE_FORMAT_RGB565,
-      .out_scale = JPEG_IMAGE_SCALE_0,
-      .flags = {
-          .swap_color_bytes = 1,
-          // ESP32 存储方式： 小端存储
-          // LCD 存储方式： 大端存储
-          // 一个像素点16位   2个字节
-      }};
-
-  // JPEG decode
-  esp_jpeg_image_output_t outimg;
-  esp_jpeg_decode(&jpeg_cfg, &outimg);
-  // 调用显示的方法
-  xiaozhi_lcd_show(pixels);
-}
+/* 说明（2026-11-14 OTA 瘦身）：原 xiaozhi_lcd_show_image() 及 EMBED_FILES image.jpg
+ * 全项目无调用点，已删除以节省约 43.7 KB flash（OTA 双槽空间紧张）。
+ * 如后续需要"上电先显示一张开机图"，重新加回函数与 EMBED_FILES 即可。 */

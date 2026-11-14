@@ -25,20 +25,14 @@ static bool s_inited = false;
 static xiaozhi_cam_format_t s_fmt = XIAOZHI_CAM_FMT_JPEG;
 static uint32_t s_snapshot_seq = 0;
 
-static pixformat_t xiaozhi_camera_pixformat(xiaozhi_cam_format_t fmt)
-{
-    return (fmt == XIAOZHI_CAM_FMT_RGB565) ? PIXFORMAT_RGB565 : PIXFORMAT_JPEG;
-}
+static pixformat_t xiaozhi_camera_pixformat(xiaozhi_cam_format_t fmt) { return (fmt == XIAOZHI_CAM_FMT_RGB565) ? PIXFORMAT_RGB565 : PIXFORMAT_JPEG; }
 
 /* 打印内部 SRAM / PSRAM 水位：内部 RAM 决定相机能否初始化，排查内存问题时先看这一行 */
 static void xiaozhi_camera_log_heap(const char *when)
 {
-    ESP_LOGI(TAG, "%s: internal free=%u KB, largest=%u B, min=%u KB | psram free=%u KB, largest=%u B", when,
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
-             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+    ESP_LOGI(TAG, "%s: internal free=%u KB, largest=%u B, min=%u KB | psram free=%u KB, largest=%u B", when, (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024), (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
 }
 
 /* 按指定模式初始化相机。
@@ -103,16 +97,13 @@ static esp_err_t xiaozhi_camera_start(xiaozhi_cam_format_t fmt)
 #else
     size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     bool psram_dma = (internal_largest < XIAOZHI_CAM_INTERNAL_DMA_MIN);
-    ESP_LOGI(TAG, "dma: auto -> %s (internal largest block %u B, need %u B)",
-             psram_dma ? "PSRAM" : "internal", (unsigned)internal_largest,
-             (unsigned)XIAOZHI_CAM_INTERNAL_DMA_MIN);
+    ESP_LOGI(TAG, "dma: auto -> %s (internal largest block %u B, need %u B)", psram_dma ? "PSRAM" : "internal", (unsigned)internal_largest, (unsigned)XIAOZHI_CAM_INTERNAL_DMA_MIN);
 #endif
 
     esp_err_t err = xiaozhi_camera_init_once(&cfg, psram_dma);
     if (err != ESP_OK) {
         /* 内部 DMA 因内存不足失败时改 PSRAM DMA，或反之，各重试一次 */
-        ESP_LOGW(TAG, "init failed with %s DMA (%s), retry with %s DMA", psram_dma ? "PSRAM" : "internal",
-                 esp_err_to_name(err), psram_dma ? "internal" : "PSRAM");
+        ESP_LOGW(TAG, "init failed with %s DMA (%s), retry with %s DMA", psram_dma ? "PSRAM" : "internal", esp_err_to_name(err), psram_dma ? "internal" : "PSRAM");
         xiaozhi_camera_log_heap("before retry");
         err = xiaozhi_camera_init_once(&cfg, !psram_dma);
         if (err == ESP_OK) {
@@ -120,8 +111,7 @@ static esp_err_t xiaozhi_camera_start(xiaozhi_cam_format_t fmt)
         }
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_camera_init failed: %s (SCCB 总线是否已由 xiaozhi_audio_init 创建? 内部 RAM 是否够?)",
-                 esp_err_to_name(err));
+        ESP_LOGE(TAG, "esp_camera_init failed: %s (SCCB 总线是否已由 xiaozhi_audio_init 创建? 内部 RAM 是否够?)", esp_err_to_name(err));
         return err;
     }
 
@@ -132,14 +122,11 @@ static esp_err_t xiaozhi_camera_start(xiaozhi_cam_format_t fmt)
         sensor->set_contrast(sensor, 0);
         sensor->set_saturation(sensor, 0);
         sensor->set_special_effect(sensor, 0);
-        ESP_LOGI(TAG, "sensor id: PID=0x%02x VER=0x%02x MIDH=0x%02x MIDL=0x%02x", sensor->id.PID,
-                 sensor->id.VER, sensor->id.MIDH, sensor->id.MIDL);
+        ESP_LOGI(TAG, "sensor id: PID=0x%02x VER=0x%02x MIDH=0x%02x MIDL=0x%02x", sensor->id.PID, sensor->id.VER, sensor->id.MIDH, sensor->id.MIDL);
     }
 
-    ESP_LOGI(TAG, "camera ready: QVGA %s, fb=%d, xclk=%d MHz, sccb=I2C%d(shared with ES8311), dma=%s",
-             (fmt == XIAOZHI_CAM_FMT_RGB565) ? "RGB565" : "JPEG", (int)cfg.fb_count,
-             XIAOZHI_CAM_XCLK_HZ / 1000000, XIAOZHI_CAM_SCCB_I2C_PORT,
-             esp_camera_get_psram_mode() ? "PSRAM" : "internal");
+    ESP_LOGI(TAG, "camera ready: QVGA %s, fb=%d, xclk=%d MHz, sccb=I2C%d(shared with ES8311), dma=%s", (fmt == XIAOZHI_CAM_FMT_RGB565) ? "RGB565" : "JPEG", (int)cfg.fb_count,
+             XIAOZHI_CAM_XCLK_HZ / 1000000, XIAOZHI_CAM_SCCB_I2C_PORT, esp_camera_get_psram_mode() ? "PSRAM" : "internal");
     xiaozhi_camera_log_heap("after init");
     return ESP_OK;
 }
@@ -178,8 +165,7 @@ esp_err_t xiaozhi_camera_init(xiaozhi_cam_format_t fmt)
     if (ret == ESP_OK) {
         s_inited = true;
         s_fmt = fmt;
-        ESP_LOGI(TAG, "psram free after init: %u KB",
-                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+        ESP_LOGI(TAG, "psram free after init: %u KB", (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     }
 
     xiaozhi_camera_unlock();
@@ -205,8 +191,7 @@ esp_err_t xiaozhi_camera_set_format(xiaozhi_cam_format_t fmt)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "switch format: %s -> %s", (s_fmt == XIAOZHI_CAM_FMT_RGB565) ? "RGB565" : "JPEG",
-             (fmt == XIAOZHI_CAM_FMT_RGB565) ? "RGB565" : "JPEG");
+    ESP_LOGI(TAG, "switch format: %s -> %s", (s_fmt == XIAOZHI_CAM_FMT_RGB565) ? "RGB565" : "JPEG", (fmt == XIAOZHI_CAM_FMT_RGB565) ? "RGB565" : "JPEG");
 
     /* 先置未就绪，避免预览任务在 deinit 与重新 init 之间取帧 */
     s_inited = false;
@@ -238,15 +223,9 @@ esp_err_t xiaozhi_camera_deinit(void)
     return ret;
 }
 
-bool xiaozhi_camera_ready(void)
-{
-    return s_inited;
-}
+bool xiaozhi_camera_ready(void) { return s_inited; }
 
-xiaozhi_cam_format_t xiaozhi_camera_format(void)
-{
-    return s_fmt;
-}
+xiaozhi_cam_format_t xiaozhi_camera_format(void) { return s_fmt; }
 
 camera_fb_t *xiaozhi_camera_grab(void)
 {
@@ -291,8 +270,7 @@ static void xiaozhi_camera_make_path(const char *tag, char *dir, size_t dir_len,
         snprintf(path, path_len, "%s/%s_%s_%03u.jpg", dir, prefix, ts, (unsigned)(s_snapshot_seq % 1000));
     } else {
         snprintf(dir, dir_len, "%s/BOOT", XIAOZHI_CAM_SNAPSHOT_DIR);
-        snprintf(path, path_len, "%s/%s_BOOT_%lu_%03u.jpg", dir, prefix,
-                 (unsigned long)(esp_timer_get_time() / 1000000), (unsigned)(s_snapshot_seq % 1000));
+        snprintf(path, path_len, "%s/%s_BOOT_%lu_%03u.jpg", dir, prefix, (unsigned long)(esp_timer_get_time() / 1000000), (unsigned)(s_snapshot_seq % 1000));
     }
     s_snapshot_seq++;
 }
@@ -348,8 +326,7 @@ esp_err_t xiaozhi_camera_snapshot(const char *tag)
                 ESP_LOGE(TAG, "snapshot: write %s short (%u/%u)", path, (unsigned)written, (unsigned)fb->len);
                 ret = ESP_FAIL;
             } else {
-                ESP_LOGI(TAG, "snapshot saved: %s (%ux%u, %u bytes)", path, (unsigned)fb->width,
-                         (unsigned)fb->height, (unsigned)fb->len);
+                ESP_LOGI(TAG, "snapshot saved: %s (%ux%u, %u bytes)", path, (unsigned)fb->width, (unsigned)fb->height, (unsigned)fb->len);
             }
         }
     }

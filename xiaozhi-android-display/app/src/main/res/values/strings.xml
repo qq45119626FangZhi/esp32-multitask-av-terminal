@@ -8,6 +8,7 @@
     <string name="mode_monitor">监控</string>
     <string name="btn_switch_mode">切换模式</string>
     <string name="btn_sd_files">SD 文件</string>
+    <string name="btn_ota">OTA 升级</string>
     <string name="sd_files_title">SD 卡文件</string>
     <string name="empty_dir">空目录</string>
     <string name="loading">加载中…</string>
@@ -15,4 +16,26 @@
     <string name="download_started">开始下载：%1$s</string>
     <string name="up_level">上一级</string>
     <string name="sd_root">/sdcard</string>
+
+    <!-- OTA 升级页 -->
+    <string name="ota_title">OTA 升级</string>
+    <string name="ota_back">返回</string>
+    <string name="ota_ver_loading">当前固件：读取中…</string>
+    <string name="ota_cur_ver">当前固件：%1$s（启动槽 %2$s）</string>
+    <string name="ota_list_title">设备上的升级包（/sdcard/OTA），点击即用该包重装</string>
+    <string name="ota_empty">还没有升级包\n可用下方按钮选择手机里的 .bin，\n或把包拷到设备的 /sdcard/OTA 目录</string>
+    <string name="ota_pick_file">选择手机文件升级</string>
+    <string name="ota_refresh">刷新列表</string>
+    <string name="ota_confirm_title">确认升级</string>
+    <string name="ota_confirm_msg">用「%1$s」升级吗？\n版本：%2$s\n设备会写入 flash 并自动重启，请勿断电。</string>
+    <string name="ota_bad_package_title">镜像未通过校验</string>
+    <string name="ota_bad_package_msg">「%1$s」的文件头不是有效的 app 镜像（可能是全片合并镜像或文件损坏），继续升级会被设备拒绝。</string>
+    <string name="ota_start">开始升级</string>
+    <string name="ota_continue">仍然继续</string>
+    <string name="ota_cancel">取消</string>
+    <string name="ota_upload_title">推送升级包</string>
+    <string name="ota_upload_msg">将「%1$s」（%2$s）发送给下位机安装？\n设备会同时把包保存到 SD 卡。</string>
+    <string name="ota_need_bin">请选择 .bin 固件包（不要选合并后的全片镜像）</string>
+    <string name="ota_too_big">文件过大（%1$d MB），超过 OTA 分区容量</string>
+    <string name="ota_busy_hint">正在升级，请等待完成</string>
 </resources>

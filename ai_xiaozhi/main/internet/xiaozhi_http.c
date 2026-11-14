@@ -25,6 +25,7 @@
 #include "xiaozhi_appmode.h"
 #include "xiaozhi_camera.h"
 #include "xiaozhi_camview.h"
+#include "xiaozhi_ota.h"
 #include "xiaozhi_recorder.h"
 #include "xiaozhi_sdcard.h"
 
@@ -682,15 +683,18 @@ static esp_err_t status_handler(httpd_req_t *req)
     xiaozhi_rec_status_t st;
     xiaozhi_recorder_get_status(&st);
 
-    char buf[512];
+    /* ver/slot：固件版本与当前启动槽（App 首页与 OTA 页都会读） */
+    char buf[640];
     snprintf(buf, sizeof(buf),
              "{\"mode\":\"%s\",\"rec\":\"%s\",\"file\":\"%s\",\"frames\":%u,\"fps\":%.1f,\"dropped\":%u,"
-             "\"files\":%u,\"reason\":\"%s\",\"sd_ready\":%s,\"sd_free_mb\":%llu,\"stream\":%s}",
+             "\"files\":%u,\"reason\":\"%s\",\"sd_ready\":%s,\"sd_free_mb\":%llu,\"stream\":%s,"
+             "\"ver\":\"%s\",\"slot\":\"%s\",\"ota\":\"%s\"}",
              xiaozhi_appmode_name(xiaozhi_appmode_get()), xiaozhi_recorder_state_name(st.state), st.file,
              (unsigned)st.frames, st.fps, (unsigned)st.dropped, (unsigned)st.files, st.reason,
              xiaozhi_sdcard_ready() ? "true" : "false",
              (unsigned long long)(xiaozhi_sdcard_free_bytes_cached() / (1024ULL * 1024ULL)),
-             s_stream_active ? "true" : "false");
+             s_stream_active ? "true" : "false", xiaozhi_ota_version(), xiaozhi_ota_slot(),
+             xiaozhi_ota_busy() ? "busy" : "idle");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -759,6 +763,328 @@ static esp_err_t mode_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, "redirect\n");
 }
 
+/* ==========================================================================
+ * OTA 固件升级接口（实现在 main/ota/xiaozhi_ota.c）
+ *   GET  /api/ota/list               列 /sdcard/OTA 下的 .bin（含镜像里的版本号）
+ *   POST /api/ota/apply?path=OTA/x.bin  用 SD 上的包安装（阻塞到写完并重启）
+ *   POST /api/ota/upload?name=x.bin&save=1  手机推包：边收边写 flash，同时落卡
+ *   GET  /api/ota/status             进度/状态
+ *   POST /api/ota/reboot             手动重启
+ * 注意：apply / upload 都在 httpd 任务内同步执行，所以进入前先停掉监控预览，
+ *       避免 SD + flash + 摄像头同时抢占资源。
+ * ========================================================================== */
+
+static esp_err_t http_ota_json(httpd_req_t *req, const char *status, const char *json)
+{
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, json);
+}
+
+/* 把 src 追加到 dst[*off]；返回 false 表示放不下。
+ * 不用 snprintf("%s")：src 长度编译期未知时会触发 -Wformat-truncation，本工程按错误处理。 */
+static bool http_ota_append(char *dst, size_t cap, size_t *off, const char *src)
+{
+    if (src == NULL) {
+        return true;
+    }
+    size_t n = strlen(src);
+    if (*off + n >= cap) {
+        return false;
+    }
+    memcpy(dst + *off, src, n);
+    *off += n;
+    dst[*off] = '\0';
+    return true;
+}
+
+
+
+/* 文件名清洗：只允许 [0-9A-Za-z._-]，其余替换成 '_'，并强制 .bin 后缀。
+ * 目的是防止路径穿越、FATFS 长文件名/中文名在 URL 里被编码出问题。 */
+static void http_ota_sanitize_name(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    const char *base = in;
+    if (base != NULL) {
+        const char *slash = strrchr(base, '/');
+        const char *bslash = strrchr(base, '\\');
+        if (slash != NULL) {
+            base = slash + 1;
+        }
+        if (bslash != NULL && bslash + 1 > base) {
+            base = bslash + 1;
+        }
+    }
+    if (base == NULL || base[0] == '\0') {
+        snprintf(out, cap, "upload.bin");
+        return;
+    }
+    for (const char *p = base; *p != '\0' && o + 1 < cap; p++) {
+        char c = *p;
+        bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '_' ||
+                  c == '-';
+        out[o++] = ok ? c : '_';
+    }
+    out[o] = '\0';
+    if (o < 5 || strcasecmp(out + o - 4, ".bin") != 0) {
+        if (o + 5 <= cap - 1) {
+            snprintf(out + o, cap - o, ".bin");
+        }
+    }
+}
+
+/* GET /api/ota/list */
+static esp_err_t ota_list_handler(httpd_req_t *req)
+{
+    /* static：httpd 任务栈只有 4~8 KB，8 条包信息（约 100 B/条）放栈上太冒险 */
+    static xiaozhi_ota_pkg_t pkgs[XIAOZHI_OTA_MAX_PKGS];
+    int n = xiaozhi_ota_list(pkgs, XIAOZHI_OTA_MAX_PKGS);
+
+    /* static：httpd 任务栈很小（4~8 KB），1 KB 级 JSON 缓冲不能放栈上 */
+    static char buf[1400];
+    size_t off = 0;
+    buf[0] = '\0';
+    bool ok = http_ota_append(buf, sizeof(buf), &off, "{\"ver\":\"") &&
+              http_ota_append(buf, sizeof(buf), &off, xiaozhi_ota_version()) &&
+              http_ota_append(buf, sizeof(buf), &off, "\",\"slot\":\"") &&
+              http_ota_append(buf, sizeof(buf), &off, xiaozhi_ota_slot()) &&
+              http_ota_append(buf, sizeof(buf), &off, "\",\"pkgs\":[");
+    if (!ok) {
+        return http_ota_json(req, "500 Internal Server Error", "{\"ok\":false,\"err\":\"json overflow\"}");
+    }
+    for (int i = 0; i < n; i++) {
+        /* 单条：全部是定长数组/字面量，snprintf 不会触发截断告警 */
+        char item[256];
+        int w = snprintf(item, sizeof(item),
+                         "%s{\"name\":\"%s\",\"path\":\"%s/%s\",\"size\":%u,\"ver\":\"%s\",\"valid\":%s}",
+                         (i == 0) ? "" : ",", pkgs[i].name, XIAOZHI_OTA_DIR_REL, pkgs[i].name,
+                         (unsigned)pkgs[i].size, pkgs[i].version, pkgs[i].valid ? "true" : "false");
+        if (w < 0 || (size_t)w >= sizeof(item)) {
+            continue;
+        }
+        if (!http_ota_append(buf, sizeof(buf), &off, item)) {
+            break; /* 理论上到不了：最多 8 条 × ~150 B < 1.4 KB */
+        }
+    }
+    (void)http_ota_append(buf, sizeof(buf), &off, "]}");
+    return http_ota_json(req, "200 OK", buf);
+}
+
+/* GET /api/ota/status */
+static esp_err_t ota_status_handler(httpd_req_t *req)
+{
+    xiaozhi_ota_status_t st;
+    xiaozhi_ota_get_status(&st);
+
+    /* msg(96) + src(64) + 其它字段 → 384 够；全部走 http_ota_append 避免 %s 截断告警 */
+    char buf[384];
+    char num[24];
+    size_t off = 0;
+    buf[0] = '\0';
+    bool ok = http_ota_append(buf, sizeof(buf), &off, "{\"state\":\"") &&
+              http_ota_append(buf, sizeof(buf), &off, xiaozhi_ota_state_name(st.state)) &&
+              http_ota_append(buf, sizeof(buf), &off, "\",\"pct\":");
+    if (ok) {
+        snprintf(num, sizeof(num), "%d", st.pct);
+        ok = http_ota_append(buf, sizeof(buf), &off, num);
+    }
+    if (ok) {
+        snprintf(num, sizeof(num), ",\"done\":%u,\"total\":%u", (unsigned)st.bytes_done, (unsigned)st.bytes_total);
+        ok = http_ota_append(buf, sizeof(buf), &off, num);
+    }
+    if (ok) {
+        ok = http_ota_append(buf, sizeof(buf), &off, ",\"msg\":\"") &&
+             http_ota_append(buf, sizeof(buf), &off, st.msg) &&
+             http_ota_append(buf, sizeof(buf), &off, "\",\"src\":\"") &&
+             http_ota_append(buf, sizeof(buf), &off, st.src) &&
+             http_ota_append(buf, sizeof(buf), &off, "\",\"ver\":\"") &&
+             http_ota_append(buf, sizeof(buf), &off, xiaozhi_ota_version()) &&
+             http_ota_append(buf, sizeof(buf), &off, "\",\"slot\":\"") &&
+             http_ota_append(buf, sizeof(buf), &off, xiaozhi_ota_slot()) &&
+             http_ota_append(buf, sizeof(buf), &off, "\"}");
+    }
+    if (!ok) {
+        return http_ota_json(req, "500 Internal Server Error", "{\"ok\":false,\"err\":\"json overflow\"}");
+    }
+    return http_ota_json(req, "200 OK", buf);
+}
+
+/* POST /api/ota/apply?path=OTA/xxx.bin（同步：写完 → 校验 → 切分区 → 1.5 s 后重启） */
+static esp_err_t ota_apply_handler(httpd_req_t *req)
+{
+    if (xiaozhi_ota_busy()) {
+        return http_ota_json(req, "409 Conflict", "{\"ok\":false,\"err\":\"正在升级中，请稍候\"}");
+    }
+
+    char query[256];
+    char raw[160];
+    char path[160] = "";
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "path", raw, sizeof(raw)) != ESP_OK ||
+        !http_url_decode(raw, path, sizeof(path)) || path[0] == '\0') {
+        return http_ota_json(req, "400 Bad Request", "{\"ok\":false,\"err\":\"缺少 path 参数\"}");
+    }
+    if (strstr(path, "..") != NULL) {
+        return http_ota_json(req, "400 Bad Request", "{\"ok\":false,\"err\":\"非法路径\"}");
+    }
+
+    ESP_LOGW(TAG, "ota apply requested: %s", path);
+    esp_err_t err = xiaozhi_ota_apply_path(path);
+    if (err != ESP_OK) {
+        xiaozhi_ota_status_t st;
+        xiaozhi_ota_get_status(&st);
+        char errbuf[64];
+        esp_err_to_name_r(err, errbuf, sizeof(errbuf));
+        char buf[192];
+        size_t eoff = 0;
+        buf[0] = '\0';
+        (void)http_ota_append(buf, sizeof(buf), &eoff, "{\"ok\":false,\"err\":\"");
+        (void)http_ota_append(buf, sizeof(buf), &eoff, (st.msg[0] != '\0') ? st.msg : errbuf);
+        (void)http_ota_append(buf, sizeof(buf), &eoff, "\"}");
+        return http_ota_json(req, "400 Bad Request", buf);
+    }
+
+    char buf[192];
+    char num[24];
+    size_t off = 0;
+    buf[0] = '\0';
+    bool ok = http_ota_append(buf, sizeof(buf), &off, "{\"ok\":true,\"ver\":\"") &&
+              http_ota_append(buf, sizeof(buf), &off, xiaozhi_ota_version()) &&
+              http_ota_append(buf, sizeof(buf), &off, "\",\"slot\":\"") &&
+              http_ota_append(buf, sizeof(buf), &off, xiaozhi_ota_slot()) &&
+              http_ota_append(buf, sizeof(buf), &off, "\",\"reboot_ms\":");
+    if (ok) {
+        snprintf(num, sizeof(num), "%d", XIAOZHI_OTA_REBOOT_DELAY_MS);
+        (void)http_ota_append(buf, sizeof(buf), &off, num);
+    }
+    (void)http_ota_append(buf, sizeof(buf), &off, "}");
+    return http_ota_json(req, "200 OK", buf);
+}
+
+/* POST /api/ota/upload?name=xx.bin&save=1   请求体 = 应用分区镜像原始字节 */
+static esp_err_t ota_upload_handler(httpd_req_t *req)
+{
+    if (xiaozhi_ota_busy()) {
+        return http_ota_json(req, "409 Conflict", "{\"ok\":false,\"err\":\"正在升级中，请稍候\"}");
+    }
+
+    char query[256];
+    char raw[128];
+    char raw_name[96] = "";
+    char name[64];
+    bool save = true;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "name", raw, sizeof(raw)) == ESP_OK) {
+            (void)http_url_decode(raw, raw_name, sizeof(raw_name));
+        }
+        if (httpd_query_key_value(query, "save", raw, sizeof(raw)) == ESP_OK) {
+            save = (raw[0] != '0');
+        }
+    }
+    http_ota_sanitize_name(raw_name, name, sizeof(name));
+
+    size_t total = req->content_len;
+    if (total == 0) {
+        return http_ota_json(req, "400 Bad Request", "{\"ok\":false,\"err\":\"请求体为空\"}");
+    }
+
+    esp_err_t err = xiaozhi_ota_upload_begin(name, (uint32_t)total, save);
+    if (err != ESP_OK) {
+        xiaozhi_ota_status_t st;
+        xiaozhi_ota_get_status(&st);
+        char errbuf[64];
+        esp_err_to_name_r(err, errbuf, sizeof(errbuf));
+        char buf[224];
+        size_t eoff = 0;
+        buf[0] = '\0';
+        (void)http_ota_append(buf, sizeof(buf), &eoff, "{\"ok\":false,\"err\":\"");
+        (void)http_ota_append(buf, sizeof(buf), &eoff, (st.msg[0] != '\0') ? st.msg : errbuf);
+        (void)http_ota_append(buf, sizeof(buf), &eoff, "\"}");
+        return http_ota_json(req,
+                             (err == ESP_ERR_INVALID_STATE) ? "409 Conflict"
+                                                            : ((err == ESP_ERR_INVALID_SIZE) ? "400 Bad Request"
+                                                                                             : "500 Internal Server Error"),
+                             buf);
+    }
+
+    uint8_t *buf = xiaozhi_ota_chunk_buf();
+    size_t chunk = xiaozhi_ota_chunk_size();
+    if (buf == NULL || chunk == 0) {
+        xiaozhi_ota_upload_abort();
+        return http_ota_json(req, "500 Internal Server Error", "{\"ok\":false,\"err\":\"缓冲不可用\"}");
+    }
+
+    /* 手机端可能中途卡顿：单次 recv 超时（config.recv_wait_timeout=10s）后重试，
+     * 连续 5 次都收不到才放弃（总容忍约 50 s 停顿） */
+    size_t remain = total;
+    int timeouts = 0;
+    while (remain > 0) {
+        size_t want = (remain > chunk) ? chunk : remain;
+        int n = httpd_req_recv(req, (char *)buf, want);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 5) {
+                ESP_LOGE(TAG, "ota upload: recv timeout too many times, abort");
+                xiaozhi_ota_upload_abort();
+                return http_ota_json(req, "408 Request Timeout", "{\"ok\":false,\"err\":\"接收超时\"}");
+            }
+            continue;
+        }
+        if (n <= 0) {
+            ESP_LOGE(TAG, "ota upload: recv failed (%d), abort", n);
+            xiaozhi_ota_upload_abort();
+            return http_ota_json(req, "400 Bad Request", "{\"ok\":false,\"err\":\"连接中断\"}");
+        }
+        timeouts = 0;
+        err = xiaozhi_ota_upload_write(buf, (size_t)n);
+        if (err != ESP_OK) {
+            xiaozhi_ota_upload_abort();
+            return http_ota_json(req, "500 Internal Server Error", "{\"ok\":false,\"err\":\"写入 flash 失败\"}");
+        }
+        remain -= (size_t)n;
+    }
+
+    err = xiaozhi_ota_upload_end();
+    if (err != ESP_OK) {
+        xiaozhi_ota_status_t st;
+        xiaozhi_ota_get_status(&st);
+        char errbuf[64];
+        esp_err_to_name_r(err, errbuf, sizeof(errbuf));
+        char json[224];
+        size_t eoff = 0;
+        json[0] = '\0';
+        (void)http_ota_append(json, sizeof(json), &eoff, "{\"ok\":false,\"err\":\"");
+        (void)http_ota_append(json, sizeof(json), &eoff, (st.msg[0] != '\0') ? st.msg : errbuf);
+        (void)http_ota_append(json, sizeof(json), &eoff, "\"}");
+        return http_ota_json(req, "400 Bad Request", json);
+    }
+
+    char json[224];
+    char num[24];
+    size_t off = 0;
+    json[0] = '\0';
+    bool ok = http_ota_append(json, sizeof(json), &off, "{\"ok\":true,\"ver\":\"") &&
+              http_ota_append(json, sizeof(json), &off, xiaozhi_ota_version()) &&
+              http_ota_append(json, sizeof(json), &off, "\",\"reboot_ms\":");
+    if (ok) {
+        snprintf(num, sizeof(num), "%d", XIAOZHI_OTA_REBOOT_DELAY_MS);
+        (void)http_ota_append(json, sizeof(json), &off, num);
+    }
+    if (ok) {
+        (void)http_ota_append(json, sizeof(json), &off, save ? ",\"saved\":true}" : ",\"saved\":false}");
+    }
+    return http_ota_json(req, "200 OK", json);
+}
+
+/* POST /api/ota/reboot：新手固件已切好启动分区，手动重启立即生效 */
+static esp_err_t ota_reboot_handler(httpd_req_t *req)
+{
+    xiaozhi_ota_schedule_reboot(300);
+    return http_ota_json(req, "200 OK", "{\"ok\":true}");
+}
+
 /* ---------------- MJPEG 实时预览 ---------------- */
 
 /* 预览任务每帧回调（同步执行）：只做一次 memcpy，绝不能阻塞 */
@@ -790,6 +1116,11 @@ static esp_err_t http_stream_reject(httpd_req_t *req, const char *msg)
 /* 真正干活：在一个独立任务里跑，避免长连接堵住 httpd 任务 */
 static void http_serve_stream(httpd_req_t *req)
 {
+    /* 升级期间必须让出带宽与 flash/SD，直接拒绝预览 */
+    if (xiaozhi_ota_busy()) {
+        (void)http_stream_reject(req, "设备正在升级固件，请稍后再试\n");
+        return;
+    }
     if (!xiaozhi_camera_ready() || !xiaozhi_camview_is_open()) {
         (void)http_stream_reject(req, "摄像头未启动：请先切到监控模式\n");
         return;
@@ -940,16 +1271,28 @@ static void http_log_heap(const char *when)
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 }
 
-static void http_log_url(void)
+/* 重新读取 netif 的实际 IP 填进 s_url。
+ * refresh_only=true 时不打日志（给 xiaozhi_http_url() 每次调用用，避免刷屏） */
+static void http_update_url(bool log_result)
 {
     esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_ip_info_t ip = {0};
     if (netif != NULL && esp_netif_get_ip_info(netif, &ip) == ESP_OK && ip.ip.addr != 0) {
-        snprintf(s_url, sizeof(s_url), "http://" IPSTR "/", IP2STR(&ip.ip));
-        ESP_LOGI(TAG, "web ready: %s （手机浏览器直接访问）", s_url);
+        char cur[40];
+        snprintf(cur, sizeof(cur), "http://" IPSTR "/", IP2STR(&ip.ip));
+        if (strcmp(cur, s_url) != 0) {
+            snprintf(s_url, sizeof(s_url), "%s", cur);
+            if (log_result) {
+                ESP_LOGI(TAG, "web ready: %s （手机浏览器直接访问）", s_url);
+            }
+        }
     } else {
-        s_url[0] = '\0';
-        ESP_LOGW(TAG, "no wifi ip yet, web server still listening on port %d", XIAOZHI_HTTP_PORT);
+        if (s_url[0] != '\0' || log_result) {
+            s_url[0] = '\0';
+            if (log_result) {
+                ESP_LOGW(TAG, "no wifi ip yet, web server still listening on port %d", XIAOZHI_HTTP_PORT);
+            }
+        }
     }
 }
 
@@ -981,12 +1324,14 @@ esp_err_t xiaozhi_http_init(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = XIAOZHI_HTTP_PORT;
-    config.max_uri_handlers = 10;
+    /* 原 10 个，新增 5 个 OTA 路由（list/apply/upload/status/reboot）后调到 16 */
+    config.max_uri_handlers = 16;
     config.max_open_sockets = XIAOZHI_HTTP_MAX_SOCKETS;
     config.lru_purge_enable = true;
     /* 对端异常断开时尽快让 send 失败，避免推流任务卡在发不出去的 socket 上占住名额 */
     config.send_wait_timeout = 3;
-    config.recv_wait_timeout = 3;
+    /* recv 超时只在 OTA 上传（POST 大包）时用得上，放宽到 10 s 以适应手机端抖动 */
+    config.recv_wait_timeout = 10;
 
     /* httpd 任务栈必须留在内部 RAM。实测（2026-11-06）此刻内部最大连续块仅 ~7KB，
      * 直接要 8192 会 ESP_ERR_HTTPD_TASK；且 httpd_start 失败会残留监听 socket，
@@ -1015,6 +1360,12 @@ esp_err_t xiaozhi_http_init(void)
     static const httpd_uri_t uri_api_list = {.uri = "/api/list", .method = HTTP_GET, .handler = api_list_handler, .user_ctx = NULL};
     static const httpd_uri_t uri_mode = {.uri = "/api/mode", .method = HTTP_GET, .handler = mode_handler, .user_ctx = NULL};
     static const httpd_uri_t uri_stream = {.uri = "/stream", .method = HTTP_GET, .handler = stream_handler, .user_ctx = NULL};
+    /* OTA（M7）：手机推送 + SD 卡包安装 */
+    static const httpd_uri_t uri_ota_list = {.uri = "/api/ota/list", .method = HTTP_GET, .handler = ota_list_handler, .user_ctx = NULL};
+    static const httpd_uri_t uri_ota_status = {.uri = "/api/ota/status", .method = HTTP_GET, .handler = ota_status_handler, .user_ctx = NULL};
+    static const httpd_uri_t uri_ota_apply = {.uri = "/api/ota/apply", .method = HTTP_POST, .handler = ota_apply_handler, .user_ctx = NULL};
+    static const httpd_uri_t uri_ota_upload = {.uri = "/api/ota/upload", .method = HTTP_POST, .handler = ota_upload_handler, .user_ctx = NULL};
+    static const httpd_uri_t uri_ota_reboot = {.uri = "/api/ota/reboot", .method = HTTP_POST, .handler = ota_reboot_handler, .user_ctx = NULL};
 
     (void)httpd_register_uri_handler(s_server, &uri_index);
     (void)httpd_register_uri_handler(s_server, &uri_index2);
@@ -1024,8 +1375,13 @@ esp_err_t xiaozhi_http_init(void)
     (void)httpd_register_uri_handler(s_server, &uri_api_list);
     (void)httpd_register_uri_handler(s_server, &uri_mode);
     (void)httpd_register_uri_handler(s_server, &uri_stream);
+    (void)httpd_register_uri_handler(s_server, &uri_ota_list);
+    (void)httpd_register_uri_handler(s_server, &uri_ota_status);
+    (void)httpd_register_uri_handler(s_server, &uri_ota_apply);
+    (void)httpd_register_uri_handler(s_server, &uri_ota_upload);
+    (void)httpd_register_uri_handler(s_server, &uri_ota_reboot);
 
-    http_log_url();
+    http_update_url(true);
     ESP_LOGI(TAG, "init ok: port=%d, frame=%d KB, stream by xiaozhi_camview tap", XIAOZHI_HTTP_PORT,
              XIAOZHI_HTTP_FRAME_MAX / 1024);
     return ESP_OK;
@@ -1033,6 +1389,9 @@ esp_err_t xiaozhi_http_init(void)
 
 const char *xiaozhi_http_url(void)
 {
+    /* 每次调用都重读 netif：DHCP 续租/重连换 IP 后，屏幕上显示的地址也是实际地址
+     * （用户要求"地址必须是实际地址，不能写死"） */
+    http_update_url(false);
     return s_url;
 }
 

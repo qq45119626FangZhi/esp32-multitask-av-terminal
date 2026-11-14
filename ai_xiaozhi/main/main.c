@@ -20,6 +20,7 @@
 #include "xiaozhi_time.h"
 #include "xiaozhi_recorder.h"
 #include "xiaozhi_http.h"
+#include "xiaozhi_ota.h"
 
 void adc_button_cb(void *arg, void *usr_data);
 // 创建所有的环形缓冲区
@@ -45,6 +46,8 @@ typedef enum {
     SW2_LONG_PRESS_START,
     SW3_SINGLE_CLICK,
     SW3_LONG_PRESS_START,
+    /* 新增事件一律追加在末尾：枚举值被强转成指针当 usr_data 传，改顺序会串事件 */
+    SW2_DOUBLE_CLICK,
 } adc_button_event_t;
 void app_main(void)
 {
@@ -71,6 +74,10 @@ void app_main(void)
     // 注册sw2长按事件的回调（门铃触发）
     adc_button_register_sw2_callback(BUTTON_LONG_PRESS_START, adc_button_cb, (void *)SW2_LONG_PRESS_START);
 #endif
+#if XIAOZHI_APPMODE_SW2_DOUBLE_DETAIL
+    // 注册sw2双击事件的回调（打开/关闭设备详情页）
+    adc_button_register_sw2_callback(BUTTON_DOUBLE_CLICK, adc_button_cb, (void *)SW2_DOUBLE_CLICK);
+#endif
     // 注册sw3的单击事件回调
     adc_button_register_sw3_callback(BUTTON_SINGLE_CLICK, adc_button_cb, (void *)SW3_SINGLE_CLICK);
     // 注册sw3的长按事件回调
@@ -82,6 +89,11 @@ void app_main(void)
     // SD卡存储初始化（M1）：上电挂载 + 容量/写速日志 + 拔卡自动重挂载
     // XIAOZHI_SD_ENABLE=0 时为空实现，不影响既有语音链路
     xiaozhi_sdcard_init();
+    // OTA 升级（M7）：打印运行槽/版本/目标槽，创建 /sdcard/OTA 目录。
+    // 必须在 xiaozhi_sdcard_init() 之后、xiaozhi_http_init() 之前（HTTP 路由要用到本模块）
+    xiaozhi_ota_init();
+    // 首页右下角显示固件版本（V1.0），版本号唯一来源是 CMakeLists 的 project(... VERSION ...)
+    xiaozhi_lvgl_set_version(xiaozhi_ota_version_short());
     // wifi的初始化~
     xiaozhi_wifi_init();
     // wifi 已连上（xiaozhi_wifi_init 阻塞到拿到 IP）：SNTP 校时一次（CST-8 北京时间），
@@ -130,6 +142,10 @@ void app_main(void)
     xiaozhi_task_create(xiaozhi_ws_send_audio_task, "xiaozhi_ws_send_audio_task", XIAOZHI_STACK_16K, NULL,
                         XIAOZHI_PRIO_AUDIO, NULL, 1);
 
+    // OTA 回滚保护确认：启动流程走到这里说明新固件能正常跑起来，
+    // 调用 esp_ota_mark_app_valid_cancel_rollback() 取消"下次自动回退旧分区"。
+    // 注意：本调用必须在所有关键初始化之后，否则新固件有缺陷也来不及回退。
+    xiaozhi_ota_mark_valid();
 }
 
 void adc_button_cb(void *arg, void *usr_data)
@@ -155,11 +171,21 @@ void adc_button_cb(void *arg, void *usr_data)
 #if XIAOZHI_APPMODE_SW3_SINGLE_SWITCH
             // 切换工作模式：语音 -> 门铃 -> 监控 -> 语音
             xiaozhi_appmode_button_switch();
+#else
+            // SW3 单击：显示/隐藏屏幕最下一行的推流地址（显示时在其它 UI 之上）
+            xiaozhi_lvgl_toggle_stream_url();
 #endif
             break;
         case SW3_LONG_PRESS_START:
             ESP_LOGI(TAG, "SW3 LONG PRESS START");
             xiaozhi_wifi_reset();
+            break;
+        case SW2_DOUBLE_CLICK:
+            ESP_LOGI(TAG, "SW2 DOUBLE CLICK");
+#if XIAOZHI_APPMODE_SW2_DOUBLE_DETAIL
+            // 设备详情页（版本 / Flash / PSRAM / SD），再双击一次关闭
+            xiaozhi_lvgl_toggle_device_detail();
+#endif
             break;
         default:
     }

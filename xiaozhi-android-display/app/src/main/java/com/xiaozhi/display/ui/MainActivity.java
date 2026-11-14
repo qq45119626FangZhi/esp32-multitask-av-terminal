@@ -57,6 +57,8 @@ public class MainActivity extends AppCompatActivity {
     private void setupViews() {
         binding.btnSwitchMode.setOnClickListener(v -> viewModel.switchNextMode());
         binding.btnSdFiles.setOnClickListener(v -> startActivity(new Intent(this, FileBrowserActivity.class)));
+        // 最下一行：OTA 固件升级（设备包列表安装 + 手机选包推送）
+        binding.btnOta.setOnClickListener(v -> startActivity(new Intent(this, OtaActivity.class)));
 
         // 长按标题：修改板子地址（板子 IP 由 DHCP 分配，换网络时需要改）
         binding.tvTitle.setOnLongClickListener(v -> {

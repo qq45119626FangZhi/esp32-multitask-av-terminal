@@ -8,16 +8,17 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
-#include "esp_lvgl_port.h"
 #include "jpeg_decoder.h"
 
 #include "xiaozhi_appmode.h"
 #include "xiaozhi_camera.h"
 #include "xiaozhi_camstamp.h"
+#include "xiaozhi_lvgl.h"
 
 #define TAG "camview"
 
@@ -31,10 +32,11 @@
 /* 关闭画面时等待预览任务退出的上限（grab 最长阻塞一帧，约 40ms） */
 #define CAMVIEW_STOP_WAIT_MS 2000
 
-static lv_obj_t *s_img = NULL;
-static lv_image_dsc_t s_dsc;
+/* 视图是否已打开。LVGL 图像对象由 xiaozhi_lvgl 的视频视图统一管理，
+ * 本模块不再持有 lv_obj_t / lv_image_dsc_t，也不直接调用任何 lv_* 接口。 */
+static bool s_opened = false;
 
-static uint16_t *s_pix = NULL;    /* 给 LVGL 用的图像缓冲（PSRAM） */
+static uint16_t *s_pix = NULL;    /* 送显示的视频帧缓冲（PSRAM，交由 xiaozhi_lvgl 借用） */
 static size_t s_pix_bytes = 0;
 static uint16_t *s_dec = NULL;    /* JPEG 解码后的 RGB565 缓冲（PSRAM） */
 static size_t s_dec_bytes = 0;
@@ -210,6 +212,30 @@ static void camview_dispatch_taps(const uint8_t *jpeg, size_t len, int w, int h)
 /* -------------------------------------------------------------------------- */
 /* 预览任务                                                                     */
 /* -------------------------------------------------------------------------- */
+
+/* 一帧的绘制参数（交给 xiaozhi_lvgl 的视频视图在端口锁内回调） */
+typedef struct {
+    const uint16_t *src;
+    int src_w;
+    int src_h;
+    int dst_w;
+    int dst_h;
+    bool swap_bytes;
+} camview_paint_arg_t;
+
+/* 由 xiaozhi_lvgl_video_update() 在持有 LVGL 端口锁的上下文里调用：
+ * 只做像素写入，禁止在此加锁/阻塞/调用 LVGL 接口。 */
+static void camview_paint(void *ctx)
+{
+    camview_paint_arg_t *a = (camview_paint_arg_t *)ctx;
+    if (s_pix == NULL || a == NULL) {
+        return;
+    }
+    camview_scale(s_pix, a->src, a->src_w, a->src_h, a->dst_w, a->dst_h, a->swap_bytes);
+    /* 北京时间水印：直接画进像素缓冲，跟随帧刷新，不额外触发 LVGL 重绘 */
+    xiaozhi_camstamp_draw(s_pix, a->dst_w, a->dst_h);
+}
+
 static void camview_task(void *arg)
 {
     (void)arg;
@@ -289,14 +315,18 @@ static void camview_task(void *arg)
             swap_bytes = XIAOZHI_CAMVIEW_SWAP_SRC_BYTES;
         }
 
-        if (src != NULL && s_visible && s_img != NULL && s_pix != NULL) {
-            /* 持 LVGL 锁写入图像缓冲，避免与渲染任务同时访问 */
-            if (lvgl_port_lock(50)) {
-                camview_scale(s_pix, src, src_w, src_h, dst_w, dst_h, swap_bytes);
-                /* 北京时间水印：直接画进像素缓冲，跟随帧刷新，不额外触发 LVGL 重绘 */
-                xiaozhi_camstamp_draw(s_pix, dst_w, dst_h);
-                lv_obj_invalidate(s_img);
-                lvgl_port_unlock();
+        if (src != NULL && s_visible && s_opened && s_pix != NULL) {
+            camview_paint_arg_t paint = {
+                .src = src,
+                .src_w = src_w,
+                .src_h = src_h,
+                .dst_w = dst_w,
+                .dst_h = dst_h,
+                .swap_bytes = swap_bytes,
+            };
+            /* 像素写入 + 标脏重绘都在 xiaozhi_lvgl 的端口锁内完成；
+             * 50 ms 拿不到锁（flush 正忙）就丢这一帧，绝不阻塞采集 */
+            if (xiaozhi_lvgl_video_update(camview_paint, &paint, 50) == ESP_OK) {
                 stat_show++;
             }
         }
@@ -424,11 +454,11 @@ esp_err_t xiaozhi_camview_open(bool fullscreen)
     const int w = fullscreen ? XIAOZHI_CAMVIEW_FULL_W : XIAOZHI_CAMVIEW_W;
     const int h = fullscreen ? XIAOZHI_CAMVIEW_FULL_H : XIAOZHI_CAMVIEW_H;
 
-    if (s_img != NULL) {
+    if (s_opened) {
         if (w == s_w && h == s_h) {
             xiaozhi_camview_set_visible(true);
             s_running = true;
-            /* 视图对象还在、但预览任务已经不存在（上次 close 等任务/等 LVGL 锁超时提前返回，
+            /* 视图对象还在、但预览任务已经不存在（上次 close 等任务超时提前返回，
              * 或任务异常退出）时，必须补建任务；否则 is_open() 仍为 true、/stream 也能挂上，
              * 却永远没有帧（实机表现：已连上但一直黑屏 + cam_hal 报 EV-VSYNC-OVF）。 */
             if (s_task == NULL) {
@@ -454,39 +484,22 @@ esp_err_t xiaozhi_camview_open(bool fullscreen)
         return err;
     }
 
-    memset(&s_dsc, 0, sizeof(s_dsc));
-    s_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    s_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    s_dsc.header.w = w;
-    s_dsc.header.h = h;
-    s_dsc.header.stride = w * (int)sizeof(uint16_t);
-    s_dsc.data_size = (uint32_t)((size_t)w * (size_t)h * sizeof(uint16_t));
-    s_dsc.data = (const uint8_t *)s_pix;
-
-    if (!lvgl_port_lock(1000)) {
-        ESP_LOGE(TAG, "lvgl lock failed");
+    /* 建视图：LVGL 对象/样式/置顶/字节序都在 xiaozhi_lvgl 内部完成 */
+    xiaozhi_lvgl_video_cfg_t cfg = {
+        .rgb565 = s_pix,
+        .w = w,
+        .h = h,
+        .fullscreen = fullscreen,
+        .offset_x = XIAOZHI_CAMVIEW_OFFSET_X,
+        .offset_y = XIAOZHI_CAMVIEW_OFFSET_Y,
+    };
+    err = xiaozhi_lvgl_video_open(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "video view open failed: %s", esp_err_to_name(err));
         camview_free_pix();
-        return ESP_ERR_TIMEOUT;
+        return err;
     }
-    lv_obj_t *screen = lv_screen_active();
-    s_img = lv_image_create(screen);
-    lv_image_set_src(s_img, &s_dsc);
-    lv_obj_set_size(s_img, w, h);
-    if (fullscreen) {
-        /* 全屏：铺满整个屏幕，去掉边框，叠在最上层（标题/emoji/文本被画面覆盖） */
-        lv_obj_align(s_img, LV_ALIGN_CENTER, 0, 0);
-        lv_obj_set_style_border_width(s_img, 0, 0);
-    } else {
-        lv_obj_align(s_img, LV_ALIGN_TOP_RIGHT, -XIAOZHI_CAMVIEW_OFFSET_X, XIAOZHI_CAMVIEW_OFFSET_Y);
-        lv_obj_set_style_border_width(s_img, 1, 0);
-        lv_obj_set_style_border_color(s_img, lv_color_hex(0x303030), 0);
-    }
-    lv_obj_set_scrollable(s_img, false);
-    lv_obj_set_style_radius(s_img, 0, 0);
-    lv_obj_set_style_pad_all(s_img, 0, 0);
-    lv_obj_set_hidden(s_img, false);
-    lv_obj_move_foreground(s_img);
-    lvgl_port_unlock();
+    s_opened = true;
 
     s_w = w;
     s_h = h;
@@ -514,7 +527,7 @@ esp_err_t xiaozhi_camview_open(bool fullscreen)
 
 esp_err_t xiaozhi_camview_close(void)
 {
-    if (s_img == NULL && s_task == NULL) {
+    if (!s_opened && s_task == NULL) {
         s_visible = false;
         s_running = false;
         return ESP_OK;
@@ -523,23 +536,23 @@ esp_err_t xiaozhi_camview_close(void)
     s_visible = false;
     s_running = false;
 
-    /* 1. 先等预览任务退出（它可能正持有一帧或正等 LVGL 锁），再动图像对象与缓冲 */
+    /* 1. 先等预览任务退出（它可能正持有一帧或正在写像素缓冲），再动视图与缓冲 */
     if (s_task != NULL && s_task_done != NULL) {
         if (xSemaphoreTake(s_task_done, pdMS_TO_TICKS(CAMVIEW_STOP_WAIT_MS)) != pdTRUE) {
-            ESP_LOGE(TAG, "close: wait preview task timeout, keep image/buffers");
+            ESP_LOGE(TAG, "close: wait preview task timeout, keep view/buffers");
             return ESP_ERR_TIMEOUT;
         }
     }
 
-    /* 2. 删除 LVGL 对象（此后 s_pix 不再被引用） */
-    if (s_img != NULL) {
-        if (!lvgl_port_lock(500)) {
-            ESP_LOGE(TAG, "close: lvgl lock failed, keep image");
-            return ESP_ERR_TIMEOUT;
+    /* 2. 销毁视图对象（此后 s_pix 不再被 LVGL 引用）。
+     * 删对象/取锁都由 xiaozhi_lvgl 负责；取锁超时同样保留缓冲，等下次 open 自愈。 */
+    if (s_opened) {
+        esp_err_t verr = xiaozhi_lvgl_video_close();
+        if (verr != ESP_OK) {
+            ESP_LOGE(TAG, "close: video view close failed (%s), keep buffers", esp_err_to_name(verr));
+            return verr;
         }
-        lv_obj_delete(s_img);
-        s_img = NULL;
-        lvgl_port_unlock();
+        s_opened = false;
     }
 
     /* 3. 归还 PSRAM */
@@ -556,25 +569,15 @@ esp_err_t xiaozhi_camview_close(void)
 
 bool xiaozhi_camview_is_open(void)
 {
-    return s_img != NULL;
+    return s_opened;
 }
 
 void xiaozhi_camview_set_visible(bool visible)
 {
-    if (s_img == NULL) {
-        s_visible = visible;
-        return;
-    }
     s_visible = visible;
-    if (lvgl_port_lock(100)) {
-        if (visible) {
-            lv_obj_set_hidden(s_img, false);
-            lv_obj_move_foreground(s_img);
-            lv_obj_invalidate(s_img);
-        } else {
-            lv_obj_set_hidden(s_img, true);
-        }
-        lvgl_port_unlock();
+    /* 显示/隐藏（含置顶与重绘）由视频视图统一处理；视图未打开时只记状态 */
+    if (s_opened) {
+        xiaozhi_lvgl_video_set_visible(visible);
     }
 }
 

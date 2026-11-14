@@ -27,6 +27,6 @@
 ],
 "idf.flashType": "UART",
 "idf.port": "COM6",
-"idf.currentSetup": "D:\\esp\\v5.3.4\\esp-idf",
+"idf.currentSetup": "D:\\C_Project_IDE\\esp\\v5.3.4\\esp-idf",
 "C_Cpp.errorSquiggles": "disabled"
 }

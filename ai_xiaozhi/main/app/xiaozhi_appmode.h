@@ -8,8 +8,9 @@
  * 设备工作模式仲裁（语音 / 门铃 / 监控）
  *   1. 三个模式互斥：同一时刻只有一个模式处于 active 状态；
  *   2. 切换入口：
- *        - 按键：SW2 单击 / SW3 单击  -> 循环切换下一个模式
- *                SW2 长按             -> 门铃触发（切到门铃模式）
+ *        - 按键：SW2 单击           -> 循环切换下一个模式
+ *                SW3 单击           -> 显示/隐藏底部推流地址（宏置 1 可改回切模式）
+ *                SW2 长按           -> 门铃触发（切到门铃模式）
  *        - 语音：小智 IoT 指令 Mode.SetMode（见 vol_iot_desc/iot_desc.json）
  *   3. 本模块只做“仲裁 + 生命周期串联”，具体业务（摄像头/SD/录像）由各模块
  *      通过 xiaozhi_appmode_register() 注册 enter/exit/trigger 钩子后自行实现，
@@ -50,10 +51,13 @@ typedef struct {
 #define XIAOZHI_APPMODE_VOICE_GATE          0
 /* SW2 单击切换模式 */
 #define XIAOZHI_APPMODE_SW2_SINGLE_SWITCH   1
-/* SW3 单击切换模式 */
-#define XIAOZHI_APPMODE_SW3_SINGLE_SWITCH   1
+/* SW3 单击：0 = 显示/隐藏屏幕底部的推流地址（默认）；
+ *           1 = 恢复为“切换模式”（语音 -> 门铃 -> 监控 -> 语音） */
+#define XIAOZHI_APPMODE_SW3_SINGLE_SWITCH   0
 /* SW2 长按触发门铃（同时切到门铃模式） */
 #define XIAOZHI_APPMODE_SW2_LONG_DOORBELL   1
+/* SW2 双击：打开/关闭“设备详情页”（版本 / Flash / PSRAM / SD） */
+#define XIAOZHI_APPMODE_SW2_DOUBLE_DETAIL   1
 /* ASR 文本兜底：云端没有下发 Mode.SetMode 时，直接用识别文本关键词切模式（默认开启） */
 #define XIAOZHI_APPMODE_STT_FALLBACK        1
 
